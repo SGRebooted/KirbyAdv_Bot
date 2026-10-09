@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# BizHawk communication files
+bridge/
+bridge_*/
+
+# Runtime locks
+parallel.lock
+
+# Generated telemetry
+telemetry/

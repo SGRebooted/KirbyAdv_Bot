@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Kirby Bot \u2014 Single",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "C:/Users/MWil/AppData/Local/Programs/Python/Python313/python.exe",
+            "program": "${workspaceFolder}/KA_Bot.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Kirby Bot \u2014 Parallel",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "C:/Users/MWil/AppData/Local/Programs/Python/Python313/python.exe",
+            "program": "${workspaceFolder}/KA_Parallel.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Kirby Bot \u2014 Control Panel",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "C:/Users/MWil/AppData/Local/Programs/Python/Python313/python.exe",
+            "program": "${workspaceFolder}/KA_ControlPanel.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
