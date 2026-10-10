@@ -1,0 +1,9 @@
+{
+  "worker_count": 6,
+  "evaluation_workers": [
+    1,
+    2,
+    3,
+    4
+  ]
+}

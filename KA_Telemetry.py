@@ -67,6 +67,9 @@ class Telemetry:
         self.enabled = True
         self.workers = {}
         self.status = "idle"
+        self.run_id = ""
+        self.mode = ""
+        self.checkpoint = {}
         self.frames_per_second = 0.0
         self.last_publish = self.last_weights = 0.0
         self.weights = []
@@ -99,7 +102,8 @@ class Telemetry:
             payload = {"session": self.session, "timestamp": time.time(),
                        "status": self.status, "updates": trainer.updates, "fps": self.frames_per_second,
                        "replay": replay_size, "loss": loss, "workers": self.workers,
-                       "weights": self.weights, "history": self.history.name}
+                       "weights": self.weights, "history": self.history.name,
+                       "run_id": self.run_id, "mode": self.mode, "checkpoint": self.checkpoint}
             # Publish a unique completed file. Never overwrite a snapshot
             # that the panel (or another reader) may currently have open.
             self.snapshot_sequence += 1
@@ -138,8 +142,9 @@ class Telemetry:
                 with self.history.open("a", newline="", encoding="utf-8") as stream:
                     writer = csv.writer(stream)
                     if new:
-                        writer.writerow(["seconds", "updates", "loss", "replay"])
-                    writer.writerow([round(now-self.started, 3), trainer.updates, loss, replay_size])
+                        writer.writerow(["seconds", "updates", "loss", "replay", "run_id", "mode", "utc"])
+                    writer.writerow([round(now-self.started, 3), trainer.updates, loss, replay_size,
+                                     self.run_id, self.mode, datetime.now(timezone.utc).isoformat()])
                 self.last_update = trainer.updates
         except (OSError, ValueError) as error:
             if not self.warned:

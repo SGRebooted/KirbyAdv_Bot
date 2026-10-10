@@ -1,18 +1,33 @@
--- Kirby RAM/control bridge for BizHawk 2.11.1 (NesHawk).
--- Load this instead of the original object logger: only one script should
--- advance frames. The original logger remains available for mapping work.
+-- Shared v8 Kirby RAM/control bridge for BizHawk.
+-- Load a generated worker_startup/worker_N.lua file in each emulator.
+-- KA_Workers.py supplies the project location and worker number.
+local config = KA_BRIDGE_CONFIG
+assert(type(config) == "table", "Load a generated worker startup script first")
+assert(type(config.root) == "string" and #config.root > 0, "Missing project root")
+local launch_token = config.launch_token or ""
+assert(type(launch_token) == "string" and (launch_token == "" or
+    (#launch_token == 32 and not launch_token:find("[^0-9a-f]"))), "Invalid launch token")
+local worker_id = config.worker_id
+assert(type(worker_id) == "number" and worker_id >= 0
+    and worker_id == math.floor(worker_id), "Invalid worker ID")
+local root = config.root:gsub("\\", "/"):gsub("/+$", "") .. "/"
+local folder = root .. (worker_id == 0 and "bridge/" or "bridge_" .. worker_id .. "/")
 
--- The folder containing KA_Bot.py and KA_Bridge.lua.
--- Forward slashes work on Windows and avoid Lua backslash escape sequences.
-local root = "D:/VS_Code_Projects/KirbyAdv_Bot/"
+-- Existing starts remain available across Lua restarts. Loading is still
+-- explicit: startup itself never saves, loads, or advances the game.
+local function has_saved_start(name)
+    local file = io.open(folder .. (name or "start.State"), "rb")
+    if not file then return false end
+    file:close()
+    return true
+end
 
--- Python creates this subfolder when KA_Bot.py starts.
--- Both programs exchange their command and response files here.
-local folder = root .. "bridge/"
 local domain = "System Bus"
 local last_id = nil
-local saved = false
 local running = true
+local shutdown_requested = false
+-- Freeplay leaves normal input and pause/unpause control to the user.
+local free_play = false
 local transition_seen = false
 local buttons = {"Up", "Down", "Left", "Right", "A", "B", "Start", "Select"}
 
@@ -153,6 +168,11 @@ local function respond(id, error_message)
             ',"terrain":' .. terrain_json() ..
             ',"transition_seen":' .. tostring(transition_seen) .. '}'
     end
+    -- Identify this worker on successful replies and errors alike.
+    text = text:sub(1, -2) .. ',"worker_id":' .. worker_id ..
+        ',"control_mode":"' .. (free_play and "freeplay" or "controlled") ..
+        '","bridge_version":5,"launch_token":"' .. launch_token ..
+        '","shutdown_supported":true,"shutdown_requested":' .. tostring(shutdown_requested) .. '}' 
     local file = assert(io.open(folder .. "response.json", "w"), "Start Python first")
     file:write(text)
     file:close()
@@ -172,12 +192,61 @@ local function process(message)
     last_id = id
     transition_seen = false
     local frames = tonumber(frame_text)
+    -- This command carries a launch token instead of controller keys. Check it
+    -- before the normal button parser; manually loaded/unidentified bridges
+    -- cannot be closed through this request.
+    if command == "shutdown" then
+        if launch_token == "" or keys ~= launch_token then
+            respond(id, "Shutdown launch token mismatch")
+            return
+        end
+        client.pause()
+        free_play = false
+        joypad.set(released_buttons(), 1)
+        shutdown_requested = true
+        running = false
+        respond(id)
+        return
+    end
     local held = released_buttons()
     for key in keys:gmatch("[^,]+") do
         if held[key] == nil then respond(id, "Unknown controller button"); return end
         held[key] = true
     end
-    if command == "step" then
+    if command == "release" then
+        free_play = true
+        -- Send a snapshot before unpausing. The loop then only yields/polls;
+        -- it does not inject buttons or force frames during normal gameplay.
+        respond(id)
+        client.unpause()
+        return
+    elseif command == "reconnect" then
+        client.pause()
+        free_play = false
+        joypad.set(released_buttons(), 1)
+        respond(id)
+        return
+    elseif free_play and (command == "observe" or command == "hello") then
+        respond(id)
+        return
+    elseif free_play and command ~= "stop" then
+        respond(id, "Use reconnect before controlled commands")
+        return
+    end
+
+    if command == "manual" then
+        if frames < 1 or frames > 60 then respond(id, "Frames must be 1 to 60"); return end
+        client.unpause()
+        for _ = 1, frames do
+            -- Debug inputs are literal: no rewards, terminal checks, or
+            -- automatic neutralization on room transitions.
+            if read8(0x62C7) == 255 then transition_seen = true end
+            joypad.set(held, 1)
+            emu.frameadvance()
+            if read8(0x62C7) == 255 then transition_seen = true end
+        end
+        client.pause()
+    elseif command == "step" then
         if frames < 1 or frames > 60 then respond(id, "Frames must be 1 to 60"); return end
         -- Allow the emulator to run while we execute this command.
         client.unpause()
@@ -210,13 +279,16 @@ local function process(message)
     elseif command == "save" then
         -- Use a dedicated file so existing numbered savestate slots are untouched.
         savestate.save(folder .. "start.State")
-        saved = true
-    elseif command == "reset" then
-        if not saved then respond(id, "Use save first in this Lua session"); return end
-        savestate.load(folder .. "start.State")
+    elseif command == "saveeval" then
+        savestate.save(folder .. "eval.State")
+    elseif command == "reset" or command == "reseteval" then
+        local name = command == "reseteval" and "eval.State" or "start.State"
+        if not has_saved_start(name) then respond(id, "Requested starting state is missing"); return end
+        savestate.load(folder .. name)
     elseif command == "stop" then
+        free_play = false
         running = false
-    elseif command ~= "observe" then
+    elseif command ~= "observe" and command ~= "hello" then
         respond(id, "Unknown command"); return
     end
     joypad.set(released_buttons(), 1)
@@ -228,7 +300,14 @@ end
 local old = io.open(folder .. "command.txt", "r")
 if old then last_id = old:read("*a"):match("^(%x+)|"); old:close() end
 client.pause()
-console.log("Kirby bridge ready. In Python, type read. Stop the old logger first.")
+-- The launcher reads this before sending a command. A unique token prevents
+-- accepting a readiness file left behind by an earlier emulator process.
+local ready = assert(io.open(folder .. "ready.json", "w"), "Start Python first")
+ready:write('{"worker_id":' .. worker_id .. ',"bridge_version":5,"launch_token":"' .. launch_token .. '"}')
+ready:close()
+console.log("Kirby bridge ready: worker " .. worker_id .. " at " .. folder)
+console.log(has_saved_start() and "Saved start available; reset loads it."
+    or "No saved start yet; save only when Kirby is at the intended start.")
 while running do
     local file = io.open(folder .. "command.txt", "r")
     if file then
@@ -240,4 +319,9 @@ while running do
     emu.yield()
 end
 joypad.set(released_buttons(), 1)
-console.log("Kirby bridge stopped. The emulator is paused.")
+console.log("Kirby worker " .. worker_id .. " stopped. The emulator is paused.")
+if shutdown_requested then
+    -- Reply was written before requesting normal emulator exit. Any frontend
+    -- dialog can still keep the process open; Python verifies actual exit.
+    client.exit()
+end

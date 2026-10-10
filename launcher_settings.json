@@ -1,0 +1,7 @@
+{
+  "emuhawk": "C:/Users/MWil/Desktop/Emulation/BizHawk-2.11.1-win-x64/EmuHawk.exe",
+  "rom": "C:/Users/MWil/Desktop/ROMs/NES/Kirby's Adventure (USA) (Rev 1).nes",
+  "base_config": "C:/Users/MWil/Desktop/Emulation/BizHawk-2.11.1-win-x64/config.ini",
+  "startup_timeout_seconds": 45,
+  "open_panel": true
+}
