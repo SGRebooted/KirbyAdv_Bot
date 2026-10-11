@@ -4,6 +4,8 @@ A RAM-based reinforcement-learning project for **Kirby’s Adventure (USA, Rev 1
 
 **Current project release: v8.** Documentation reconstructed on **October 10, 2026** from the complete available history of **“Start coding the bot”**, its saved release notes/source packages, the v8 development conversation, and the installed source files.
 
+Updated October 11, 2026 with periodic automatic checkpoints and the user’s current 1,000-attempt limit.
+
 The current training target is **stage 1-1, rooms 43–45**. This is not yet a whole-game bot. The model does not see screenshots: its observations come from player RAM, nine object slots, and a local terrain grid.
 
 ## Contents
@@ -44,7 +46,7 @@ launch
 loadmodel
 ```
 
-`launch` opens or reuses recognized managed emulator processes, checks their bridge identity, restores training starts, verifies independent stepping, and opens the dashboard if configured. **It does not start training.** `loadmodel` restores the latest v8 checkpoint and clears replay memory.
+`launch` opens or reuses recognized managed emulator processes, checks their bridge identity, restores training starts, verifies independent stepping, and opens the dashboard if configured. **It does not start training.** `loadmodel` restores the manual latest v8 checkpoint and clears replay memory. To recover newer automatic overnight progress, use `autosaves` followed by `loadauto` instead of `loadmodel`.
 
 For the current curriculum, workers 1–4 start in room 43 and workers 5–6 start in room 44. That split comes from their individual saved game states; selecting six workers alone does not assign rooms.
 
@@ -136,6 +138,7 @@ The v8 parallel console intentionally requires a loaded/imported model before au
 | `KA_ControlPanel.py` | Separate, read-only Tk dashboard |
 | `KA_History.py` | Legacy/v8 attempt-log parsing, filtering, metrics, deduplication |
 | `KA_Diagnostics.py` | Raw diagnostic recording and command-line recording summaries |
+| `KA_Autosave.py` | Automatic checkpoint timing, newest-three retention, and recovery-file selection |
 | `KA_TerrainProbe.lua` | Separate terrain-research tool; not required for normal training |
 | `parallel_settings.json` | Remembered worker count and frozen evaluation worker IDs |
 | `launcher_settings.json` | Emulator/ROM/configuration paths and launcher preferences |
@@ -144,6 +147,7 @@ The v8 parallel console intentionally requires a loaded/imported model before au
 | `bridge/` | Legacy single-worker communication directory, corresponding to worker 0 |
 | `emulator_configs/` | Separate BizHawk settings for managed workers |
 | `models/` | Neural-network checkpoints and preserved older versions |
+| `models/autosave/` | Three newest automatic training recovery checkpoints; separate from manual latest/best |
 | `logs/` | Attempt CSVs |
 | `logs/archive/` | Rotated attempt CSVs, retained indefinitely |
 | `telemetry/` | Completed status snapshots and per-session sampled loss CSVs |
@@ -186,7 +190,7 @@ At `Parallel>`:
 ptrain ATTEMPTS EPSILON_1 EPSILON_2 ... EPSILON_N
 ```
 
-- Attempts are **per worker**, from 1 to 200. The default is 3.
+- Attempts are **per worker**, from 1 to 1,000 in the current installed configuration. The default is 3.
 - Supply one epsilon for every selected worker, or omit all epsilon values.
 - Epsilon is between 0 and 1: probability of choosing a random action instead of the model’s highest-scoring action.
 - Omitted values alternate **0.1, 0.3, 0.1, 0.3, ...** in worker order.
@@ -211,7 +215,7 @@ Focus the **Python terminal**, then press the key without Enter:
 |---|---|
 | **P** | Request pause; outstanding requests finish first. Press again after the pause completes to resume the same attempts. |
 | **S** | Save latest while fully paused; wait for confirmation. |
-| **Q** | Stop after outstanding work drains and return to `Parallel>`. Does not automatically save latest. |
+| **Q** | Stop after outstanding work drains and return to `Parallel>`. Makes a final automatic recovery save after a training run; does not automatically save manual latest. |
 
 Ordinary console commands become available after automation returns to the prompt. Use Q rather than Ctrl+C when you want to preserve the live console and finish requests cleanly.
 
@@ -239,7 +243,34 @@ Replay contains up to 20,000 experiences and lives only in memory. Restarting Py
 
 `loadmodel` loads latest; `loadbest` loads best into memory. Both clear replay. Loading does not itself overwrite the latest file, but a later `savemodel` or successful save-first shutdown saves whichever model is currently loaded.
 
-Finishing `ptrain` does **not** automatically save latest. A successful new-best evaluation saves **best**, not latest. Preserve important checkpoints with separate backup filenames before experiments.
+Finishing `ptrain` now saves an **automatic recovery checkpoint**, but does **not** automatically save manual latest. A successful new-best evaluation saves **best**, not latest. Preserve important checkpoints with separate backup filenames before experiments.
+
+### Automatic recovery checkpoints
+
+Training saves after **150 completed attempts across all workers or 30 minutes**,
+whichever comes first, and also on normal completion, Q, or a handled worker-error
+stop after outstanding requests drain. With six workers, 150 is about 25 attempts
+per worker; the faster workers do not wait for matching round numbers. Counters
+restart for each training command and reset after each successful auto save.
+
+Automatic files are separate, under `models/autosave/`. The newest three matching
+completed files are kept; older locked files may survive until later cleanup.
+Manual latest, evaluation best, and manually named backup files are untouched.
+Each recovery checkpoint contains the same model/target/optimizer/update data as
+manual saves, without replay or emulator state.
+
+Use `autosaves` to list them and `loadauto` to load the newest. `loadauto 2` or
+`loadauto 3` loads an older retained file. Loading clears replay. Automatic saving
+does not silently change what `loadmodel` loads. After recovery, use `savemodel`
+if you want to promote that recovered state to manual latest.
+
+Writes run between optimizer updates and may briefly reduce throughput. The timer
+is wall-clock time checked by the coordinator loop, not an exact independent
+deadline. An unchanged paused model is not copied repeatedly. Failed saves warn
+and retry after 60 seconds during training; end/Q tries again despite the cooldown.
+Earlier saves are retained on failure. Unexpected termination cannot guarantee a
+final save; ordinary evaluation, benchmarks, probes, and manual play never trigger
+this automatic writer. Keep Windows awake for overnight training.
 
 ### Fixed evaluation baseline
 
@@ -405,7 +436,9 @@ All commands below are entered at **`Parallel>`**, after any active run has fini
 | `importv7` | One-time compatible v7 parallel import |
 | `importprevious` | Dedicated v6-to-current action migration |
 | `importsingle` | Strict import of the current single-worker checkpoint |
-| `savemodel` | Save the loaded shared model to v8 latest |
+| `savemodel` | Save the loaded shared model to v8 manual latest |
+| `autosaves` | List automatic recovery checkpoints, newest first |
+| `loadauto [1/2/3]` | Load a retained automatic checkpoint; defaults to newest, clears replay |
 | `ptrain [ATTEMPTS] [EPSILONS...]` | Training; defaults to 3 attempts each and alternating 0.1/0.3 |
 | `eval` | One greedy, nonlearning attempt per frozen evaluation worker |
 | `bench [STEPS]` | Collection-only benchmark; default 120, range 1–900 decisions per worker |
@@ -744,7 +777,7 @@ Dates below follow **America/Chicago** conversation timestamps. Early work was i
 - Used `kirby_parallel_v7_latest.pth` / `best.pth`, `parallel_v7_attempts.csv`, and single-worker `kirby_v7.pth`.
 - Later reports showed greedy entry into room 44, followed by stalling. Mouth-full/hovering behavior and jump-hold sequences remained diagnostic questions, not confirmed fixes.
 
-### V8 — scalable operation and debugging tools, October 9–10, 2026
+### V8 — scalable operation and debugging tools, October 9–11, 2026
 
 V8 deliberately preserved the v7 network, observations, actions, rewards, and learning cadence while improving operation and visibility.
 
@@ -756,6 +789,8 @@ V8 deliberately preserved the v7 network, observations, actions, rewards, and le
 6. **Save-first shutdown:** save the loaded model before requesting managed emulator exits, include recognized deselected workers, ignore unrelated processes, and keep the console available on failure.
 7. **RAM recording:** added bounded one-/four-frame probe sampling into separate JSONL files with metadata, raw snapshots, completion markers, and a summary tool.
 8. **Integration review:** checked installed files, regression suites, Lua execution with simulated APIs, starts/settings, and read-only checkpoint compatibility. Corrected installation copy/paste mix-ups affecting bridge/panel files; these were file-placement repairs, not learning-algorithm changes.
+
+9. **Overnight recovery follow-up (October 11):** added 150-attempt/30-minute automatic checkpoints, final saves on completion/Q/handled worker errors, newest-three retention in a separate folder, failure retries, and explicit `autosaves`/`loadauto` recovery commands. Preserved the user’s locally increased 1,000-attempt limit. No reward, action, encoder, or learning-cadence changes.
 
 Operational changes and observations during v8:
 
@@ -777,7 +812,7 @@ Operational changes and observations during v8:
 - **Evaluation:** a fixed set supports consistent comparisons but is small. Identical or nearly identical starts may produce similar greedy behavior; four workers are not automatically four independent difficulty tests.
 - **Performance:** file exchange, emulator scheduling, and fresh-jump requests have overhead. Measure real training throughput before adding more workers or changing transport.
 - **Diagnostic UI:** the recorder currently has console commands and a summary script, not a dedicated panel menu.
-- **Persistence:** replay and a complete live-session snapshot are not saved. No periodic automatic latest save or fresh-model console command has been added.
+- **Persistence:** replay and a complete live-session snapshot are not saved. Automatic recovery checkpoints are available, but a fresh-model console command has not been added. Automatic saves do not overwrite manual latest.
 
 Keep experiments separate and preserve working checkpoints. Do not change observation meaning/order, action order/count, or reward metadata without an explicit migration or retraining plan.
 

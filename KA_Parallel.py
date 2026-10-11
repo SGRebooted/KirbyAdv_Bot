@@ -20,6 +20,7 @@ from KA_Telemetry import Telemetry, archive_log, read_key
 import KA_Bot as bot
 from KA_Workers import prepare_worker
 from KA_Launcher import Launcher
+from KA_Autosave import AutoCheckpoint, checkpoints, checkpoint_at
 from KA_Diagnostics import capture as capture_diagnostics
 from KA_Starts import evaluation_workers, freeze_evaluation, clone_training_start
 
@@ -476,8 +477,8 @@ class Coordinator:
             raise ValueError("Use importv7 or loadmodel first.")
         if not self.verified:
             raise ValueError("Use verify first; every selected worker needs a saved starting state.")
-        if type(attempts) is not int or not 1 <= attempts <= 200:
-            raise ValueError("Choose 1–200 attempts per worker.")
+        if type(attempts) is not int or not 1 <= attempts <= 1000:
+            raise ValueError("Choose 1–1000 attempts per worker.")
         if not worker_ids or len(set(worker_ids)) != len(worker_ids) or any(i not in self.worker_ids for i in worker_ids):
             raise ValueError("Choose a nonempty subset of the selected workers.")
         epsilons = epsilons or {i: 0.0 for i in worker_ids}
@@ -512,6 +513,9 @@ class Coordinator:
         pause_started = None
         started = time.perf_counter()
         starting_updates = self.trainer.updates
+        # Only training creates automatic checkpoints. Evaluation/bench/manual
+        # work never triggers this writer or its retention cleanup.
+        automatic = AutoCheckpoint(ROOT, self.save) if training else None
 
         def report(context, reason, success=False):
             """Write each episode once, including partial episodes on Q/errors."""
@@ -552,6 +556,8 @@ class Coordinator:
                   f"damage {context.health_lost:g} | frames {context.frames}")
 
         print(f"{mode}: {attempts} attempt(s) per worker; {len(worker_ids)} worker(s). Q stops safely; P pauses/resumes; S saves while fully paused.")
+        if automatic is not None:
+            print("Autosave: every 150 completed attempts across all workers or 30 minutes; also on finish/Q. Keeps newest 3 in models/autosave/.")
         with ThreadPoolExecutor(max_workers=len(worker_ids)) as executor:
             def reset_worker(worker_id):
                 """Reset in that worker's thread without blocking the other one."""
@@ -576,6 +582,10 @@ class Coordinator:
                 reset_worker(worker_id)
 
             while pending or (paused and not stopping):
+                # Synchronous on main, never in the middle of an optimizer
+                # update. Bridge threads can finish their outstanding replies.
+                if automatic is not None and not stopping:
+                    automatic.maybe_save(self.trainer.updates)
                 key = read_key()
                 if key == "q":
                     stopping = True
@@ -674,10 +684,14 @@ class Coordinator:
 
                             if info["stop_reason"]:
                                 report(context, info["stop_reason"], info["success"])
+                                if automatic is not None and (terminated or truncated):
+                                    automatic.completed_attempt()
                                 if not (terminated or truncated):
                                     stopping = failed = True
                             elif step_limit is not None and context.steps >= step_limit:
                                 report(context, "requested step limit")
+                                if automatic is not None:
+                                    automatic.completed_attempt()
 
                         if not stopping and not paused:
                             if context.reported:
@@ -698,6 +712,12 @@ class Coordinator:
             for context in contexts.values():
                 report(context, "stopped by Q" if not failed else "stopped after worker error")
 
+        # All outstanding requests have drained before this final checkpoint.
+        # Worker errors return here too; partial/Q attempts do not increment
+        # the periodic completion counter but learned weights are still saved.
+        if automatic is not None:
+            reason = "worker error stop" if failed else "stopped by Q" if stopping else "training finished"
+            automatic.maybe_save(self.trainer.updates, final_reason=reason)
         if pause_started is not None:
             paused_seconds += time.perf_counter() - pause_started
         self.telemetry.status = "idle"
@@ -822,6 +842,7 @@ def main():
                     print("probe ID FRAMES [STRIDE=4] [ACTION=wait] (0–600 frames; stride 1 or 4)")
                     print("telemetry on/off | importv7 | importprevious | importsingle | loadmodel | loadbest | savemodel | bench [steps]")
                     print("ptrain [attempts PER WORKER] [one epsilon per selected worker] | eval | shutdown | quit")
+                    print("autosaves | loadauto [1/2/3] (1=newest; loading clears replay)")
                     print("Defaults: 3 attempts each; alternating epsilons 0.1/0.3 for any worker count. Q stop; P pause/resume; S save when paused.")
                 elif command == "probe":
                     if not 3 <= len(parts) <= 5:
@@ -907,6 +928,15 @@ def main():
                 elif command in {"importsingle", "loadmodel", "loadbest"} and len(parts) == 1:
                     path = {"importsingle": bot.MODEL_PATH, "loadmodel": LATEST_PATH, "loadbest": BEST_PATH}[command]
                     app.load(path)
+                elif command == "autosaves" and len(parts) == 1:
+                    paths = checkpoints(ROOT)
+                    if not paths:
+                        print("No automatic checkpoints yet.")
+                    for index, path in enumerate(paths, 1):
+                        print(f"{index}: {path}")
+                elif command == "loadauto" and len(parts) <= 2:
+                    # Explicit recovery: never silently prefer auto over latest.
+                    app.load(checkpoint_at(ROOT, int(parts[1]) if len(parts) == 2 else 1))
                 elif command == "savemodel" and len(parts) == 1:
                     if not app.model_loaded:
                         raise ValueError("Load your trained model first.")
