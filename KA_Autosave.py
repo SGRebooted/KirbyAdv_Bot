@@ -13,7 +13,7 @@ AUTO_ATTEMPTS = 150       # Completed attempts across all selected workers.
 AUTO_SECONDS = 30 * 60    # Wall-clock time; independent of game-frame budgets.
 AUTO_KEEP = 3
 RETRY_SECONDS = 60
-_NAME = re.compile(r"kirby_parallel_v8_auto_\d{8}T\d{12}Z_[0-9a-f]{32}\.pth")
+_NAME = re.compile(r"kirby_parallel_v9_auto_\d{8}T\d{12}Z_[0-9a-f]{32}\.pth")
 
 
 def checkpoints(root):
@@ -21,7 +21,7 @@ def checkpoints(root):
 
     Ignore temporary files, manually named backups, and latest/best files.
     """
-    directory = Path(root) / "models" / "autosave"
+    directory = Path(root) / "models" / "autosave_v9"
     return sorted((p for p in directory.glob("*.pth")
                    if p.is_file() and _NAME.fullmatch(p.name)),
                   key=lambda p: p.name, reverse=True)
@@ -73,9 +73,9 @@ class AutoCheckpoint:
         else:
             reason = final_reason
 
-        directory = self.root / "models" / "autosave"
+        directory = self.root / "models" / "autosave_v9"
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        path = directory / f"kirby_parallel_v8_auto_{stamp}_{uuid.uuid4().hex}.pth"
+        path = directory / f"kirby_parallel_v9_auto_{stamp}_{uuid.uuid4().hex}.pth"
         try:
             directory.mkdir(parents=True, exist_ok=True)
             self.save(path)

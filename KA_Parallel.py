@@ -25,10 +25,10 @@ from KA_Diagnostics import capture as capture_diagnostics
 from KA_Starts import evaluation_workers, freeze_evaluation, clone_training_start
 
 ROOT = Path(__file__).resolve().parent
-LATEST_PATH = ROOT / "models" / "kirby_parallel_v8_latest.pth"
+LATEST_PATH = ROOT / "models" / "kirby_parallel_v9_latest.pth"
 V7_PATH = ROOT / "models" / "kirby_parallel_v7_latest.pth"
-BEST_PATH = ROOT / "models" / "kirby_parallel_v8_best.pth"
-LOG_PATH = ROOT / "logs" / "parallel_v8_attempts.csv"
+BEST_PATH = ROOT / "models" / "kirby_parallel_v9_best.pth"
+LOG_PATH = ROOT / "logs" / "parallel_v9_attempts.csv"
 SETTINGS_PATH = ROOT / "parallel_settings.json"
 LOG_FIELDS = [
     "schema_version", "session_id", "run_id", "run_started_utc", "utc",
@@ -57,9 +57,9 @@ def check_log_header():
     if LOG_PATH.exists() and LOG_PATH.stat().st_size:
         with LOG_PATH.open(newline="", encoding="utf-8") as stream:
             if next(csv.reader(stream), None) != LOG_FIELDS:
-                raise ValueError("v8 log columns differ; archive that CSV before running.")
+                raise ValueError("v9 log columns differ; archive that CSV before running.")
 
-REPLAY_CAPACITY = 20000
+REPLAY_CAPACITY = 10000  # Wider observations: approximately 340 MiB of replay tensor data.
 
 
 class WorkerBridge(bot.KirbyBridge):
@@ -458,6 +458,7 @@ class Coordinator:
         self.telemetry.frames_per_second = 0.0
         for i in self.worker_ids:
             state = self.environments[i].observe()
+            bot.encode_observation(state)  # Validate the full v9 schema before training.
             context = Attempt(i, state=state)
             self.update_worker(context, 0.0)
             self.telemetry.workers[str(i)]["status"] = "ready"
@@ -474,7 +475,7 @@ class Coordinator:
         """
         worker_ids = self.worker_ids if worker_ids is None else worker_ids
         if not self.model_loaded:
-            raise ValueError("Use importv7 or loadmodel first.")
+            raise ValueError("Use newmodel or loadmodel first.")
         if not self.verified:
             raise ValueError("Use verify first; every selected worker needs a saved starting state.")
         if type(attempts) is not int or not 1 <= attempts <= 1000:
@@ -557,7 +558,7 @@ class Coordinator:
 
         print(f"{mode}: {attempts} attempt(s) per worker; {len(worker_ids)} worker(s). Q stops safely; P pauses/resumes; S saves while fully paused.")
         if automatic is not None:
-            print("Autosave: every 150 completed attempts across all workers or 30 minutes; also on finish/Q. Keeps newest 3 in models/autosave/.")
+            print("Autosave: every 150 completed attempts across all workers or 30 minutes; also on finish/Q. Keeps newest 3 in models/autosave_v9/.")
         with ThreadPoolExecutor(max_workers=len(worker_ids)) as executor:
             def reset_worker(worker_id):
                 """Reset in that worker's thread without blocking the other one."""
@@ -840,7 +841,7 @@ def main():
                     print("step is manual-only (1–60 frames, no learning). release ID | reconnect ID")
                     print("launch | freezeeval [replace] | saveeval ID | clonestart SOURCE TARGET")
                     print("probe ID FRAMES [STRIDE=4] [ACTION=wait] (0–600 frames; stride 1 or 4)")
-                    print("telemetry on/off | importv7 | importprevious | importsingle | loadmodel | loadbest | savemodel | bench [steps]")
+                    print("telemetry on/off | newmodel | importsingle | loadmodel | loadbest | savemodel | bench [steps]")
                     print("ptrain [attempts PER WORKER] [one epsilon per selected worker] | eval | shutdown | quit")
                     print("autosaves | loadauto [1/2/3] (1=newest; loading clears replay)")
                     print("Defaults: 3 attempts each; alternating epsilons 0.1/0.3 for any worker count. Q stop; P pause/resume; S save when paused.")
@@ -906,25 +907,15 @@ def main():
                     app.select_workers(int(parts[1]))
                 elif command == "verify" and len(parts) == 1:
                     app.verify()
-                elif command == "importv7" and len(parts) == 1:
-                    # Only orchestration/logging changed: preserve the v7 model,
-                    # target network, optimizer, and update count via strict load.
-                    app.load(V7_PATH)
-                    print("Use savemodel to create the separate v8 latest checkpoint.")
-                elif command == "importprevious" and len(parts) == 1:
-                    # Import the v6 parallel weights into the 14-action network.
-                    # Keep update history; reset optimizer state and replay.
-                    restored = bot.import_time_model(ROOT / "models" / "kirby_parallel_v6_latest.pth")
-                    app.trainer = restored
-                    app.replay = bot.ReplayBuffer(REPLAY_CAPACITY)
-                    app.stored_total = 0
+                elif command in {"importv7", "importprevious"}:
+                    raise ValueError("V9 needs fresh weights. Use newmodel, or loadmodel for an existing v9 checkpoint.")
+                elif command == "newmodel" and len(parts) == 1:
+                    if app.model_loaded:
+                        raise ValueError("A model is already active. Restart the console to start fresh; save first if needed.")
                     app.model_loaded = True
-                    print(f"Imported previous parallel trainer at update {restored.updates}; optimizer and replay reset.")
-                    app.last_loss = None
-                    app.telemetry.checkpoint = {"loaded_from": "v6 import (optimizer reset)",
-                                                "loaded_updates": restored.updates,
-                                                "saved_to": "None since import", "saved_updates": None}
-                    print("Use savemodel to create the separate v8 checkpoint.")
+                    app.telemetry.checkpoint = {"loaded_from": "Fresh v9 Double DQN", "loaded_updates": 0,
+                                                "saved_to": "None", "saved_updates": None}
+                    print("Fresh v9 Double DQN activated. Use savemodel to save it; verify workers before training.")
                 elif command in {"importsingle", "loadmodel", "loadbest"} and len(parts) == 1:
                     path = {"importsingle": bot.MODEL_PATH, "loadmodel": LATEST_PATH, "loadbest": BEST_PATH}[command]
                     app.load(path)

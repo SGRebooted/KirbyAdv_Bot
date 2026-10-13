@@ -1,4 +1,4 @@
--- Shared v8 Kirby RAM/control bridge for BizHawk.
+-- Shared Kirby bridge: v9 observation encoder (control protocol 5).
 -- Load a generated worker_startup/worker_N.lua file in each emulator.
 -- KA_Workers.py supplies the project location and worker number.
 local config = KA_BRIDGE_CONFIG
@@ -47,20 +47,21 @@ end
 local function player_json()
     return string.format(
         '{"hp":%d,"lives":%d,"ability":%d,"mouth_full":%d,"sprite_state":%d,' ..
-        '"x":%d,"y":%d,"vx":%d,"vy":%d,"level":%d,"stage":%d,"room":%d}',
+        '"x":%d,"y":%d,"vx":%d,"vy":%d,"level":%d,"stage":%d,"room":%d,"action_state":%d,"contact_flags":%d,"script":%d}',
         -- Include the sprite state observed during Warp Star travel.
         read8(0x597), read8(0x599), read8(0x5E3), read8(0x5E0),
         read8(0x62C7),
         read16(0x83, 0x95), read16(0xB9, 0xCB),
         read16(0x5B9, 0x5BA, true), read16(0x5BD, 0x5BE, true),
-        read8(0x558), read8(0x559), read16(0x55E, 0x55F))
+        read8(0x558), read8(0x559), read16(0x55E, 0x55F),
+        read8(0x5E1), read8(0x5FB), read8(0x6129))
 end
 
 -- Preserve all nine slots and all scratch variables, including empty slots.
 -- Scratch variables may be stale; do not use them as confirmed item identities.
-local function objects_json()
+local function objects_json(first_slot, last_slot)
     local objects = {}
-    for slot = 0x09, 0x11 do
+    for slot = first_slot, last_slot do
         local vars = {}
         for index = 0, 7 do
             vars[#vars + 1] = tostring(read8(0x61CA + index * 0x12 + slot))
@@ -76,7 +77,7 @@ local function objects_json()
     return "[" .. table.concat(objects, ",") .. "]"
 end
 
-local function terrain_json()
+local function terrain_json(wide)
     -- During observed loading/travel states, map memory may be changing.
     if read8(0x62C7) == 255 then
         return '{"status":"transition","cells":null}'
@@ -115,9 +116,11 @@ local function terrain_json()
     local center_y = math.floor(read16(0xB9, 0xCB) / 16)
     local cells = {}
 
-    -- Store 81 attributes in row order: top-left through bottom-right.
-    for dy = -4, 4 do
-        for dx = -4, 4 do
+    -- Store local or expanded attributes in row order: top-left through bottom-right.
+    local radius = wide and 8 or 4
+    local bottom = wide and 12 or 4
+    for dy = -4, bottom do
+        for dx = -radius, radius do
             local tile_x = center_x + dx
             local tile_y = center_y + dy
 
@@ -164,8 +167,12 @@ local function respond(id, error_message)
                 -- Attach terrain to the same snapshot as Kirby and the objects.
         text = '{"id":"' .. id .. '","frame":' .. emu.framecount() ..
             ',"kirby":' .. player_json() ..
-            ',"objects":' .. objects_json() ..
-            ',"terrain":' .. terrain_json() ..
+            ',"objects":' .. objects_json(9, 17) ..
+            -- Keep the legacy nine slots unchanged for the v8 encoder.
+            ',"all_objects":' .. objects_json(0, 17) ..
+            ',"observation_schema":2' ..
+            ',"terrain":' .. terrain_json(false) ..
+            ',"terrain_wide":' .. terrain_json(true) ..
             ',"transition_seen":' .. tostring(transition_seen) .. '}'
     end
     -- Identify this worker on successful replies and errors alike.

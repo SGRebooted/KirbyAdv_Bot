@@ -38,7 +38,7 @@ ACTIONS = {
 # Script IDs describe behavior families, not necessarily unique enemy species.
 # These labels include the later findings from the RAM-mapping conversation.
 OBJECT_NAMES = {
-    2: "Death star effect (observed)",
+    2: "Effect family (not necessarily a kill)",
     4: "End-level bonus stars?", 5: "Pickup / item family",
     6: "Warp Star / travel star family", 8: "Midboss damage explosion",
     13: "Warp Star landing effect?", 14: "Waddle Dee", 15: "Waddle Doo",
@@ -47,7 +47,7 @@ OBJECT_NAMES = {
     33: "Cappy", 34: "Poppy Bros. Sr. / bomb family", 41: "Hot Head",
     43: "Sword Knight", 56: "Bronto Burt", 57: "Gordo",
     65: "Cutter / blade family", 80: "Beam attack", 81: "Shotzo projectile",
-    82: "Sparky attack", 84: "Hot Head pre-attack sparks", 86: "Hot Head fire",
+    82: "Sparky attack", 84: "Hot Head associated effect (timing unverified)", 86: "Hot Head fire",
     87: "Sword strike", 89: "Broom Hatter dust", 103: "Crane Fever plush",
     255: "Empty",
 }
@@ -60,18 +60,19 @@ MODEL_ACTIONS = (
     "jump", "right_jump", "left_jump",
 )
 
-# Preserve the original 1048 inputs, then append seven context inputs.
-# Keeping old input positions lets us migrate the trained network weights.
+# Legacy constants are retained for old console helpers; the imported v9
+# encoder below defines the active input layout. Legacy imports are disabled.
 LEGACY_OBSERVATION_SIZE = 237 + 81 * 10 + 1
 PREVIOUS_BUTTONS = ("Left", "Right", "Up", "Down", "A", "B")
 OBSERVATION_SIZE = LEGACY_OBSERVATION_SIZE + 1 + len(PREVIOUS_BUTTONS)
-ENCODER_VERSION = 3
+from KA_Observation import (encode_observation, OBSERVATION_SIZE, ENCODER_VERSION,
+                            MODE_OFFSET, allowed_indices)
 
 # One unit of progress gap means one screen-width (256 pixels) to recover.
 # Do not clamp: a gap larger than one screen still carries useful information.
 PROGRESS_GAP_SCALE = 256.0
 V3_MODEL_PATH = Path(__file__).resolve().parent / "models" / "kirby_rooms_v3.pth"
-TRAINING_VERSION = 6
+TRAINING_VERSION = 9
 
 # Tested stage-1 gameplay rooms; hub and bonus rooms are not ordinary visits.
 GAMEPLAY_ROOMS = {(0, 0, 43), (0, 0, 44), (0, 0, 45)}
@@ -101,7 +102,7 @@ PROGRESS_PENALTY_ROOMS = {43}
 MODEL_PATH = (
     Path(__file__).resolve().parent
     / "models"
-    / "kirby_v7.pth"
+    / "kirby_v9.pth"
 )
 
 # Use the GPU when available; otherwise use the CPU.
@@ -177,6 +178,8 @@ class KirbyBridge:
                 if reply.get("id") == request_id:
                     if "error" in reply:
                         raise RuntimeError(reply["error"])
+                    if reply.get("observation_schema") != 2:
+                        raise RuntimeError("V9 requires the new KA_Bridge.lua (observation schema 2). Reload all workers.")
                     return reply
             except (OSError, ValueError):
                 # Lua may still be writing its response; try again shortly.
@@ -678,9 +681,14 @@ class DQNTrainer:
 
             # Terminal observations need no future-value estimate.
             if continuing.any().item():
-                future[continuing] = self.target(
-                    next_observations[continuing]
-                ).max(dim=1).values
+                upcoming = next_observations[continuing]
+                # Double DQN: online network selects; target network evaluates.
+                online_scores = self.model(upcoming)
+                floating = upcoming[:, MODE_OFFSET + 13] == 1.0
+                for name in ("jump", "right_jump", "left_jump"):
+                    online_scores[floating, MODEL_ACTIONS.index(name)] = -torch.inf
+                selected = online_scores.argmax(dim=1, keepdim=True)
+                future[continuing] = self.target(upcoming).gather(1, selected).squeeze(1)
 
             # Discount by 0.99 per four-frame action.
             # Adjust for shorter actions at the attempt's time limit.
@@ -782,8 +790,9 @@ def measure_new_progress(previous, current, farthest_by_room):
 
 def choose_action(model, observation, epsilon):
     """Choose randomly for exploration, or use the model's highest score."""
+    allowed = allowed_indices(observation, MODEL_ACTIONS)
     if model is None or random.random() < epsilon:
-        return random.choice(MODEL_ACTIONS), "random"
+        return MODEL_ACTIONS[random.choice(allowed)], "random"
 
     # Make a batch containing one observation on the model's device.
     device = next(model.parameters()).device
@@ -798,6 +807,8 @@ def choose_action(model, observation, epsilon):
         if not torch.isfinite(scores).all().item():
             raise RuntimeError("Non-finite action scores; play stopped.")
 
+        blocked = [i for i in range(len(MODEL_ACTIONS)) if i not in allowed]
+        scores[blocked] = -torch.inf
         action_index = scores.argmax().item()
 
     return MODEL_ACTIONS[action_index], "model"
@@ -938,107 +949,6 @@ def encode_terrain(state):
 
     return features
 
-def encode_observation(state):
-    """Convert one RAM observation into player, object, and terrain inputs."""
-    player = state["kirby"]
-
-    # Scale numeric fields using their RAM storage ranges.
-    # These divisors are not assumptions about pixels or visible health.
-    # Signed velocities retain their direction: negative stays negative.
-    features = [
-        player["hp"] / 255.0,
-        player["lives"] / 255.0,
-        player["mouth_full"] / 255.0,
-        player["x"] / 65535.0,
-        player["y"] / 65535.0,
-        player["vx"] / 32768.0,
-        player["vy"] / 32768.0,
-
-        # Explicitly mark the health value observed during death.
-        float(player["hp"] == 255),
-    ]
-
-    # Preserve ability and location IDs without needing a complete catalog.
-    # The room ID uses two RAM bytes, so it needs sixteen flags.
-    features.extend(encode_id(player["ability"], 8))
-    features.extend(encode_id(player["level"], 8))
-    features.extend(encode_id(player["stage"], 8))
-    features.extend(encode_id(player["room"], 16))
-
-    # Look up objects by slot number instead of trusting their list order.
-    objects_by_slot = {
-        obj["slot"]: obj
-        for obj in state["objects"]
-    }
-
-    # Missing or duplicate slots indicate an incomplete bridge observation.
-    # Don't silently mistake missing data for an empty object slot.
-    expected_slots = set(range(0x09, 0x12))
-    if (
-        len(state["objects"]) != 9
-        or set(objects_by_slot) != expected_slots
-    ):
-        raise ValueError("Expected exactly one object for each slot 09–11.")
-
-    # Each of the nine slots contributes exactly 21 inputs.
-    for slot in range(0x09, 0x12):
-        obj = objects_by_slot[slot]
-
-        if obj["script"] == 255:
-            # Empty slots may retain old coordinates and other RAM values.
-            # Zero all their inputs so those leftovers aren't observations.
-            features.extend([0.0] * 21)
-            continue
-
-        # A presence flag distinguishes active objects from empty slots.
-        features.append(1.0)
-
-        # Preserve the raw script ID, including IDs we haven't identified.
-        features.extend(encode_id(obj["script"], 8))
-
-        # Relative positions describe where the object is from Kirby.
-        # Positive dx means right; positive dy means a larger Y coordinate.
-        features.extend([
-            (obj["x"] - player["x"]) / 65535.0,
-            (obj["y"] - player["y"]) / 65535.0,
-            obj["vx"] / 32768.0,
-            obj["vy"] / 32768.0,
-        ])
-
-        # Pose is another ID, so preserve it as eight binary flags.
-        features.extend(encode_id(obj["pose"], 8))
-
-    # Check the existing player/object portion before appending terrain.
-    if len(features) != 237:
-        raise ValueError("The player/object encoder produced the wrong size.")
-
-    # Append terrain so existing player/object positions remain unchanged.
-    features.extend(encode_terrain(state))
-
-    # Preserve the legacy progress-timer input and its scaling for migration.
-    # It is now informational; the time cost does not depend on this timer.
-    features.append(
-        min(state["no_progress_frames"] / PROGRESS_GRACE_FRAMES, 1.0)
-    )
-
-    # Append context AFTER the old inputs so imported weights keep their meaning.
-    gap = state["progress_gap_pixels"]
-    previous_buttons = state["previous_buttons"]
-    if type(gap) is not int or gap < 0:
-        raise ValueError("Invalid progress gap in observation.")
-    if len(previous_buttons) != len(PREVIOUS_BUTTONS) or any(
-        value not in (0.0, 1.0) for value in previous_buttons
-    ):
-        raise ValueError("Expected six previous-button flags.")
-    features.append(gap / PROGRESS_GAP_SCALE)
-    features.extend(previous_buttons)
-
-    # The network must receive exactly the number of inputs it expects.
-    if len(features) != OBSERVATION_SIZE:
-        raise ValueError("The full observation produced the wrong size.")
-
-    return features
-
 def show_terrain(state):
     """Display the terrain snapshot received from Lua."""
     terrain = state.get("terrain")
@@ -1157,6 +1067,7 @@ def load_model():
 
 
 def expand_legacy_weights(weights, model):
+    raise ValueError("V9 uses a new encoder. Start fresh; legacy weight imports are disabled.")
     """Add zero-weight columns for the seven new inputs; preserve old weights."""
     expected = model.state_dict()
     if set(weights) != set(expected):
@@ -1182,6 +1093,7 @@ def expand_legacy_weights(weights, model):
 
 
 def import_legacy_model(path, training_version):
+    raise ValueError("V9 uses a new encoder. Start fresh; legacy weight imports are disabled.")
     """Migrate a 1048-input model without modifying its checkpoint on disk."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
@@ -1220,6 +1132,7 @@ def import_v3_model():
 
 
 def import_time_model(path):
+    raise ValueError("V9 uses a new encoder. Start fresh; legacy weight imports are disabled.")
     """Import a v6 checkpoint, retaining all learned policy/target weights.
 
     Append three output rows, seeded from their held-A counterparts. Adam state

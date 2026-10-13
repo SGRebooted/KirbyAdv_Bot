@@ -1,7 +1,7 @@
 -- Read-only game research. Run by itself in a manual BizHawk instance.
 -- Edit these settings for each experiment. The diagnostics folder must exist.
 local ROOT = "C:/VSCode_Projects_SSD/KA_Bot_SSD"
-local LABEL = "kirby_jump"
+local LABEL = "Kirby_walking_vs_running"
 local STRIDE = 1               -- 1 for attacks/jumps; 4 for broad scouting
 local MAX_FRAMES = 1800        -- stops recording after this many frame callbacks
 local FULL_EVERY = 120         -- full snapshot every 120 samples; deltas otherwise

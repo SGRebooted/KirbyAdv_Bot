@@ -1,4 +1,4 @@
-"""Read-only v8 dashboard. Run separately; closing it does not stop training."""
+"""Read-only v9 dashboard. Run separately; closing it does not stop training."""
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 import csv
@@ -132,7 +132,7 @@ class Panel:
         self.reader = ThreadPoolExecutor(max_workers=1)
         self.pending = None
         self.last_scan = 0
-        window.title("Kirby v8 Control Panel")
+        window.title("Kirby v9 Control Panel")
         window.geometry("1180x880")
         self.status = tk.StringVar(value="Waiting for telemetry…")
         ttk.Label(window, textvariable=self.status, padding=8).pack(fill="x")
