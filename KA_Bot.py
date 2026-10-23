@@ -78,7 +78,7 @@ TRAINING_VERSION = 9
 GAMEPLAY_ROOMS = {(0, 0, 43), (0, 0, 44), (0, 0, 45)}
 NEW_ROOM_REWARD = 5.0
 GOAL_REWARD = 10.0
-ROOM_FRAME_BUDGET = 3600
+ROOM_FRAME_BUDGET = 5400    #90 seconds
 # Ten seconds without a new 16-pixel cell or new rightward record ends an
 # attempt. This is an external truncation, not a death or extra punishment.
 NO_PROGRESS_LIMIT = 600

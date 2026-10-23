@@ -1,13 +1,13 @@
 -- Read-only game research. Run by itself in a manual BizHawk instance.
 -- Edit these settings for each experiment. The diagnostics folder must exist.
 local ROOT = "C:/VSCode_Projects_SSD/KA_Bot_SSD"
-local LABEL = "Kirby_walking_vs_running"
+local LABEL = "Kirby_i_frame_test"
 local STRIDE = 1               -- 1 for attacks/jumps; 4 for broad scouting
 local MAX_FRAMES = 1800        -- stops recording after this many frame callbacks
 local FULL_EVERY = 120         -- full snapshot every 120 samples; deltas otherwise
 
 assert(STRIDE == 1 or STRIDE == 4, "STRIDE must be 1 or 4")
-assert(MAX_FRAMES > 0 and MAX_FRAMES == math.floor(MAX_FRAMES))
+assert(MAX_FRAMES >= 0 and MAX_FRAMES == math.floor(MAX_FRAMES))
 assert(FULL_EVERY > 0 and FULL_EVERY == math.floor(FULL_EVERY))
 assert(LABEL:match("^[%w_-]+$"), "Use letters, digits, underscore or dash for LABEL")
 -- Only RAM ranges: do not sweep PPU/APU/controller I/O through System Bus.
@@ -89,7 +89,7 @@ callbacks[#callbacks + 1] = event.onframeend(function()
     guarded(function()
         ticks = ticks + 1
         if ticks % STRIDE == 0 then sample() end
-        if ticks >= MAX_FRAMES then finish("frame_limit") end
+        if MAX_FRAMES > 0 and ticks >= MAX_FRAMES then finish("frame_limit") end
     end)
 end, "KA research frame")
 callbacks[#callbacks + 1] = event.onloadstate(function()
